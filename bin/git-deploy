@@ -1,13 +1,7 @@
 #!/usr/bin/env ruby
 
-if ARGV[0].nil? || ARGV[0].empty?
-  deploy = 'deploy.yml'
-else
-  deploy = ARGV[0] + '.yml';
-end
-
-unless File.exists? deploy
-  puts "File does not exist: " + deploy
+unless File.exists? 'deploy.yml'
+  puts "File does not exist: deploy.yml"
   exit
 end
 
@@ -28,7 +22,7 @@ revision_file.close
 
 service_failures = {}
 
-services = YAML.load_file deploy
+services = YAML.load_file 'deploy.yml'
 settings = services.delete('settings') || {}
 
 trap 'INT' do
@@ -45,7 +39,6 @@ module Git
     # We figure out only which files need updating
     # so don't upload duplicate files
     def diff_committed(local_path, revision = nil)
-      remote_files = {}
       if revision
         command = "git diff --name-status #{revision} -- #{local_path}"
       else
@@ -113,19 +106,17 @@ module Git
         self.connect
         begin
           if ! self.diff
-            self.disconnect
             return
           end
 
           if upload_maintenance_file
             puts "Uploading Maintenance file"
-            self.upload_maintenance_file
+            @ftp.put(@options['maintenance_file'], @options['maintenance_deploy_to'])
           end
           self.upload
-          self.upload_revision_file
           if upload_maintenance_file
             puts "Removing Maintenance file"
-            self.remove_maintenance_file
+            @ftp.put(@options['maintenance_deploy_to'], @options['maintenance_deploy_to'])
           end
           self.disconnect
           return true
@@ -177,13 +168,14 @@ module Git
       if @options['revision'] == remote_revision
         if @options['ignore_if_same_revision']
           puts "Same revision, ignoring"
-          return false
+          next
         end
 
         puts "Same revision, overwriting"
         remote_files = Git.diff_committed(@options['local_path'])
       else
-        remote_files = Git.diff_committed(@options['local_path'], "#{remote_revision}...HEAD")
+        remote_revision_parameter = "#{remote_revision}...HEAD".split.join(' ').gsub(/ /,'')
+        remote_files = Git.diff_committed(@options['local_path'], remote_revision_parameter)
       end
     end
 
@@ -210,21 +202,10 @@ module Git
         end
         @remote_files.delete(local_file)
       end
-    end
 
-    def upload_revision_file
       puts 'Uploading REVISION'
       self.put(@options['revision_file'].path, "REVISION")
     end
-
-    def upload_maintenance_file
-      self.put(@options['maintenance_file'], @options['maintenance_deploy_to'])
-    end
-
-    def remove_maintenance_file
-      self.put(@options['maintenance_deploy_to'], @options['maintenance_deploy_to'])
-    end
-
   end
 
   class SFTP < Service
@@ -257,17 +238,17 @@ module Git
       remote_revision = false
       begin
         @sftp.file.open("#{@path}/REVISION", "r") do |f|
-          remote_revision = f.gets.strip
+          remote_revision = f.gets
+          remote_revision = remote_revision.gsub(/\r\n?/, "")
         end
 
-        puts "Remote Revision: #{remote_revision}"
       rescue Net::SFTP::StatusException => e
         raise e unless e.code == 2 && e.description == "no such file"
+        puts e.description
         remote_revision = revision
       end
       remote_revision
     end
-
   end
 
   class FTP < Service
@@ -363,7 +344,6 @@ module Git
         end
       end
     end
-
   end
 end
 
@@ -411,15 +391,13 @@ services.each do |uri, options|
   when 'sftp' then Git::SFTP.new(uri, options)
   when 'ftp'  then Git::FTP.new(uri, options)
   end
-  service.automate
-  unless service.failures.empty?
+  unless service.automate
     service_failures[uri] = service.failures
   end
 end
 
 unless service_failures.empty?
   puts "Failures"
-  puts service_failures.inspect
   service_failures.each do |uri, failures|
     failures.each do |failure|
       puts "#{uri}: #{failure.class} #{failure}"
